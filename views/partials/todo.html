@@ -1,0 +1,21 @@
+<li id="todo-{{.ID}}" class="{{if .Completed}}done{{end}}">
+  <strong class="titulo">{{.Title}}</strong>
+  {{if .Description}}<p>{{.Description}}</p>{{end}}
+  <small>{{if .Completed}}Completada{{else}}Pendiente{{end}}</small>
+  <div class="acciones">
+    <button hx-patch="/todos/{{.ID}}/status" hx-vals='{"completed": "{{if .Completed}}false{{else}}true{{end}}"}'
+            hx-target="#todo-{{.ID}}" hx-swap="outerHTML">
+      {{if .Completed}}Marcar pendiente{{else}}Marcar completada{{end}}
+    </button>
+    <button hx-delete="/todos/{{.ID}}" hx-target="#todo-{{.ID}}" hx-swap="outerHTML"
+            hx-confirm="¿Eliminar esta tarea?">Eliminar</button>
+  </div>
+  <details>
+    <summary>Editar</summary>
+    <form hx-put="/todos/{{.ID}}" hx-target="#todo-{{.ID}}" hx-swap="outerHTML">
+      <input type="text" name="title" value="{{.Title}}" required>
+      <textarea name="description">{{.Description}}</textarea>
+      <button type="submit">Guardar</button>
+    </form>
+  </details>
+</li>

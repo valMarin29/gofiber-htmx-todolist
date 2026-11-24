@@ -1,0 +1,241 @@
+# Pipeline CI/CD — Gestor de tareas (gofiber-htmx-todolist)
+#
+# Es el mismo pipeline del taller anterior (GitLab CI/CD), pasado a GitHub Actions.
+# Tiene los seis pasos del taller:
+#   1. Trigger: push a main o develop, pull request o ejecución manual
+#   2. Infraestructura: cada job corre en una máquina Ubuntu limpia de GitHub
+#   3. Checkout: se descarga el código del commit (actions/checkout)
+#   4. Dependencias, revisión de estilo (lint) y compilación (build)
+#   5. Pruebas unitarias del Plan de Pruebas, con cobertura mínima del 70 %
+#   6. Despliegue: imagen Docker + arranque del contenedor y verificación de salud
+#
+# Si un job falla, los siguientes NO se ejecutan (needs). Por eso, si una prueba
+# unitaria falla, no se construye la imagen ni se despliega nada.
+
+name: Pipeline CI/CD
+
+# ---------------------------------------------------------------------------
+# PASO 1. TRIGGER
+# ---------------------------------------------------------------------------
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch: # botón "Run workflow" en la pestaña Actions
+
+# Parámetros del pipeline (se pueden cambiar aquí).
+env:
+  COVERAGE_MIN: "70"                 # cobertura mínima exigida (%)
+  GOTESTSUM_VERSION: "v1.13.0"
+  # Paquetes que se miden para la cobertura (lógica de negocio y acceso a datos).
+  COVERAGE_PKGS: "./internal/auth/...,./internal/models/...,./internal/services/..."
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # PASO 4a. REVISIÓN DE ESTILO
+  # -------------------------------------------------------------------------
+  lint:
+    name: "4a. Lint (gofmt + go vet)"
+    runs-on: ubuntu-latest            # PASO 2. INFRAESTRUCTURA
+    steps:
+      - name: "3. Checkout del código"
+        uses: actions/checkout@v4
+
+      - name: "Instalar Go (versión de go.mod)"
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Descargar dependencias
+        run: go mod download
+
+      - name: Revisar formato (gofmt)
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Hay archivos sin formato:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Buscar errores comunes (go vet)
+        run: go vet ./...
+
+  # -------------------------------------------------------------------------
+  # PASO 4b. COMPILACIÓN
+  # -------------------------------------------------------------------------
+  build:
+    name: "4b. Build (go build)"
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compilar el servicio
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/api ./cmd/server
+
+      - name: Guardar el ejecutable como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ejecutable
+          path: bin/api
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # PASO 5. PRUEBAS UNITARIAS (Plan de Pruebas: CP-USR, CP-CRE, CP-CON, CP-ACT, CP-ELI)
+  # -------------------------------------------------------------------------
+  unit-tests:
+    name: "5. Pruebas unitarias"
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Instalar gotestsum (reporte JUnit)
+        run: go install gotest.tools/gotestsum@${GOTESTSUM_VERSION}
+
+      - name: Ejecutar las pruebas unitarias
+        run: |
+          gotestsum --junitfile report.xml --jsonfile pruebas.json --format testname -- \
+            -coverprofile=coverage.out -coverpkg="${COVERAGE_PKGS}" ./...
+
+      - name: Verificar cobertura mínima
+        run: |
+          go tool cover -func=coverage.out | tee cobertura.txt
+          TOTAL=$(awk '/^total:/ {gsub("%", "", $3); print $3}' cobertura.txt)
+          echo "Cobertura total: ${TOTAL} % (mínimo ${COVERAGE_MIN} %)"
+          if awk -v t="$TOTAL" -v m="$COVERAGE_MIN" 'BEGIN { exit !(t < m) }'; then
+            echo "::error::La cobertura (${TOTAL} %) está por debajo del mínimo (${COVERAGE_MIN} %)"
+            exit 1
+          fi
+
+      - name: Resumen de resultados
+        if: always()
+        run: |
+          {
+            echo "## Resultado de las pruebas unitarias"
+            echo
+            if [ -f pruebas.json ]; then
+              PASS=$(grep -c '"Action":"pass","Package":"[^"]*","Test":"TestC[^/"]*"' pruebas.json || true)
+              FAIL=$(grep -c '"Action":"fail","Package":"[^"]*","Test":"TestC[^/"]*"' pruebas.json || true)
+              PLAN=$(grep -c '"Action":"pass","Package":"[^"]*","Test":"TestCP_[^/"]*"' pruebas.json || true)
+              echo "| Pruebas que pasaron | Pruebas que fallaron | Casos del plan aprobados |"
+              echo "|---|---|---|"
+              echo "| ${PASS} | ${FAIL} | ${PLAN} / 60 |"
+              echo
+              if [ "$FAIL" != "0" ]; then
+                echo "### Pruebas que fallaron"
+                grep -o '"Action":"fail","Package":"[^"]*","Test":"TestC[^/"]*"' pruebas.json \
+                  | sed -E 's/.*"Test":"([^"]*)"/- \1/' | sort -u
+              fi
+            fi
+            if [ -f cobertura.txt ]; then
+              echo
+              echo "**Cobertura total:** $(awk '/^total:/ {print $3}' cobertura.txt) (mínimo ${COVERAGE_MIN} %)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar reportes (JUnit y cobertura)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-pruebas
+          path: |
+            report.xml
+            coverage.out
+            cobertura.txt
+          retention-days: 30
+
+  # -------------------------------------------------------------------------
+  # PASO 6a. DESPLIEGUE — construir la imagen Docker
+  # Usa el mismo ejecutable que compiló el job build (no se vuelve a compilar).
+  # -------------------------------------------------------------------------
+  docker-image:
+    name: "6a. Imagen Docker"
+    needs: unit-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Traer el ejecutable del job build
+        uses: actions/download-artifact@v4
+        with:
+          name: ejecutable
+          path: bin
+
+      - name: Construir la imagen
+        run: |
+          chmod +x bin/api
+          docker build -t gestor-tareas:${GITHUB_SHA::7} .
+          docker save gestor-tareas:${GITHUB_SHA::7} -o imagen.tar
+
+      - name: Guardar la imagen como artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: imagen-docker
+          path: imagen.tar
+          retention-days: 7
+
+  # -------------------------------------------------------------------------
+  # PASO 6b. DESPLIEGUE AL AMBIENTE DE EJECUCIÓN
+  # Arranca el contenedor y comprueba que el servicio responde.
+  # En un push a main, además publica la imagen en GitHub Container Registry.
+  # -------------------------------------------------------------------------
+  deploy:
+    name: "6b. Despliegue"
+    needs: docker-image
+    runs-on: ubuntu-latest
+    environment: produccion
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Traer la imagen
+        uses: actions/download-artifact@v4
+        with:
+          name: imagen-docker
+
+      - name: Desplegar el contenedor
+        run: |
+          docker load -i imagen.tar
+          docker run -d --name gestor-tareas -p 8080:8080 gestor-tareas:${GITHUB_SHA::7}
+
+      - name: Verificar que el servicio responde (health check)
+        run: |
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:8080/health; then
+              echo
+              echo "Servicio desplegado y respondiendo."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::El servicio no respondió"
+          docker logs gestor-tareas
+          exit 1
+
+      - name: Verificar la página de inicio de sesión
+        run: curl -fsS http://localhost:8080/login | grep -q "Iniciar sesión"
+
+      - name: Publicar la imagen en GitHub Container Registry (solo main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          IMAGEN="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag gestor-tareas:${GITHUB_SHA::7} "$IMAGEN:${GITHUB_SHA::7}"
+          docker tag gestor-tareas:${GITHUB_SHA::7} "$IMAGEN:latest"
+          docker push "$IMAGEN:${GITHUB_SHA::7}"
+          docker push "$IMAGEN:latest"
+          echo "Imagen publicada: $IMAGEN:${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Detener el contenedor
+        if: always()
+        run: docker rm -f gestor-tareas || true

@@ -1,0 +1,14 @@
+# Ejecutables
+bin/
+
+# Base de datos local
+*.db
+
+# Reportes de pruebas
+coverage.out
+cobertura.txt
+report.xml
+pruebas.json
+
+# Sistema
+.DS_Store

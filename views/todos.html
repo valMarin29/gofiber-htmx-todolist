@@ -1,0 +1,14 @@
+<header>
+  <h1>Tareas de {{.Username}}</h1>
+  <form method="post" action="/logout"><button type="submit">Cerrar sesión</button></form>
+</header>
+
+<form hx-post="/todos" hx-target="#lista" hx-swap="afterbegin" hx-on::after-request="if(event.detail.successful) this.reset()">
+  <input type="text" name="title" placeholder="Título (obligatorio)" required>
+  <textarea name="description" placeholder="Descripción (opcional)"></textarea>
+  <button type="submit">Agregar tarea</button>
+</form>
+
+<ul id="lista">
+  {{range .Todos}}{{template "partials/todo" .}}{{end}}
+</ul>
