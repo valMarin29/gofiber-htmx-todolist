@@ -22,7 +22,7 @@ func esperarEliminacion(mock sqlmock.Sqlmock, todoID, owner, filasAfectadas int6
 // CP-ELI-01 — Eliminación de una tarea propia pendiente (RU009).
 func TestCP_ELI_01_EliminarTareaPendiente(t *testing.T) {
 	db, mock := nuevoSimulador(t)
-	esperarEliminacion(mock, 11, usuarioA, 1)
+	esperarEliminacion(mock, 99, usuarioA, 1)
 
 	if err := NewTodoStore(db).Delete(usuarioA, 11); err != nil {
 		t.Fatalf("se esperaba una eliminación confirmada, se obtuvo: %v", err)
